@@ -1,10 +1,20 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, collection, serverTimestamp, runTransaction, query, getDocs, deleteDoc } from 'firebase/firestore';
 
 // --- Firebase Configuration ---
-// The __firebase_config variable will be provided in the execution environment.
+// IMPORTANT: You MUST replace the placeholder values below with your own
+// Firebase project's configuration for the app to work.
+//
+// How to get your Firebase config:
+// 1. Go to the Firebase Console: https://console.firebase.google.com/
+// 2. Select your project.
+// 3. In the project overview, click the Web icon (</>) to go to your web app's settings.
+// 4. If you haven't created a web app yet, do so now.
+// 5. In your app's settings, find the "SDK setup and configuration" section.
+// 6. Select "Config" and copy the entire firebaseConfig object.
+// 7. Paste it here, replacing the placeholder object below.
 const firebaseConfig = {
   apiKey: "AIzaSyAtptYDaij6TsorYbRcLS3Jl8gIbqmVR0w",
   authDomain: "poker-night-1.firebaseapp.com",
@@ -252,10 +262,16 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
 
     const player = useMemo(() => players.find(p => p.id === playerId), [players, playerId]);
     const activePlayers = useMemo(() => players.filter(p => !p.isSpectator), [players]);
+    
+    // Firestore paths
+    const gameDocRef = useMemo(() => doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState"), [gameId]);
+    const playersColRef = useMemo(() => collection(gameDocRef, "players"), [gameDocRef]);
+    const actionsColRef = useMemo(() => collection(gameDocRef, "actions"), [gameDocRef]);
+
 
     useEffect(() => {
         if (!gameId) return;
-        const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
+        
         const unsubscribeGame = onSnapshot(gameDocRef, (doc) => {
             if (doc.exists()) {
                 const data = doc.data();
@@ -272,7 +288,6 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
             }
         });
 
-        const playersColRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`);
         const unsubscribePlayers = onSnapshot(playersColRef, (snapshot) => {
             const playersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             
@@ -294,11 +309,11 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
             unsubscribeGame();
             unsubscribePlayers();
         };
-    }, [gameId, setPage]);
+    }, [gameId, setPage, gameDocRef, playersColRef]);
     
     const handleGameAction = useCallback(async (action, amount = 0) => {
         if (!gameId || !playerId) return;
-        const gameActionRef = doc(collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`));
+        const gameActionRef = doc(actionsColRef);
         try {
             await setDoc(gameActionRef, {
                 action,
@@ -310,20 +325,20 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
             console.error("Error performing game action:", error);
             setMessage("Error: Could not perform action.");
         }
-    }, [gameId, playerId]);
+    }, [gameId, playerId, actionsColRef]);
     
     const handleStartGame = async () => {
         if (activePlayers.length < 2) {
             setMessage("Need at least 2 players to start.");
             return;
         }
-        const startGameActionRef = doc(collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`));
+        const startGameActionRef = doc(actionsColRef);
         await setDoc(startGameActionRef, { action: "startGame", playerId, timestamp: serverTimestamp() });
     };
 
     const handleRebuy = async () => {
         if (rebuyAmount <= 0 || !gameId || !playerId) return;
-        const playerDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`, playerId);
+        const playerDocRef = doc(playersColRef, playerId);
         try {
             await runTransaction(db, async (transaction) => {
                 const playerDoc = await transaction.get(playerDocRef);
@@ -341,7 +356,7 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
 
     const toggleSpectate = async () => {
         if (!gameId || !playerId) return;
-        const playerDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`, playerId);
+        const playerDocRef = doc(playersColRef, playerId);
         await setDoc(playerDocRef, { isSpectator: !player?.isSpectator }, { merge: true });
     };
 
@@ -473,8 +488,8 @@ const LoginPage = ({ setPage, userId, gameId }) => {
 
         try {
             const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
-            const playerDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`, userId);
-            const playersColRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`);
+            const playersColRef = collection(gameDocRef, "players");
+            const playerDocRef = doc(playersColRef, userId);
 
             await runTransaction(db, async (transaction) => {
                 const gameDoc = await transaction.get(gameDocRef);
@@ -582,28 +597,81 @@ export default function App() {
     const [authInfo, setAuthInfo] = useState({ isAuthReady: false, userId: null });
     const [gameId, setGameId] = useState(null);
 
+    // This is the main "game loop" that processes actions.
+    // In a production app, this logic would live on a server (e.g., Cloud Functions)
+    // to be more secure and authoritative. For this project, one client acts as the "host".
+    const gameLogicRunner = useCallback(async (actionDoc) => {
+        const actionData = actionDoc.data();
+        const actionId = actionDoc.id;
+
+        await runTransaction(db, async (transaction) => {
+            const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
+            const playersColRef = collection(gameDocRef, "players");
+
+            const gameDoc = await transaction.get(gameDocRef);
+            if (!gameDoc.exists()) return;
+            
+            const playersSnapshot = await getDocs(query(playersColRef));
+            let playersData = playersSnapshot.docs.map(d => ({id: d.id, ...d.data()}));
+            let gameStateData = gameDoc.data();
+            
+            if (actionData.action === 'startGame') {
+                 gameStateData = handleStartGameLogic(gameStateData, playersData);
+            } else {
+                const result = handlePlayerActionLogic(gameStateData, playersData, actionData);
+                gameStateData = result.gameState;
+                playersData = result.players;
+            }
+            
+            for(const p of playersData) {
+                const playerDocRef = doc(playersColRef, p.id);
+                transaction.set(playerDocRef, p);
+            }
+            
+            transaction.set(gameDocRef, gameStateData);
+        });
+
+        // Clean up the processed action
+        await deleteDoc(doc(collection(doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState"), "actions"), actionId));
+    }, [gameId]);
+
+
     useEffect(() => {
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-poker-game';
+        // All players must use the same gameId to join the same table.
+        // You can change this to any unique string.
+        const appId = 'poker-night-live';
         setGameId(appId);
 
-        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+        const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
             if (user) {
                 setAuthInfo({ isAuthReady: true, userId: user.uid });
             } else {
                  try {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
+                    await signInAnonymously(auth);
                 } catch (error) {
-                    console.error("Authentication failed:", error);
+                    console.error("Anonymous authentication failed:", error);
                     setAuthInfo({ isAuthReady: true, userId: null });
                 }
             }
         });
-        return () => unsubscribe();
+
+        return () => unsubscribeAuth();
     }, []);
+
+    useEffect(() => {
+        if (!authInfo.isAuthReady || !gameId) return;
+
+        const actionsColRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`);
+        const unsubscribeActions = onSnapshot(actionsColRef, (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === "added") {
+                    gameLogicRunner(change.doc);
+                }
+            });
+        });
+
+        return () => unsubscribeActions();
+    }, [authInfo.isAuthReady, gameId, gameLogicRunner]);
 
     const handleStartGameLogic = (gameState, players) => {
         const activePlayers = players.filter(p => !p.isSpectator && p.chips > 0);
@@ -703,6 +771,8 @@ export default function App() {
                 player.chips = 0;
                 player.lastAction = 'All-in';
                 break;
+            default:
+                break;
         }
         
         activePlayers = players.filter(p => !p.isSpectator && !p.hasFolded);
@@ -762,6 +832,8 @@ export default function App() {
                     gameState.lastMessage = `${winner.name} wins $${gameState.pot} with a ${winner.handDetails.name}`;
                     gameState.status = 'waiting';
                     break;
+                default:
+                    break;
             }
         } else {
              gameState.currentTurnPlayerId = nextTurnPlayer();
@@ -769,50 +841,6 @@ export default function App() {
 
         return {gameState, players};
     };
-
-    useEffect(() => {
-        if (!authInfo.isAuthReady || !gameId) return;
-
-        const actionsRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`);
-        const unsubscribe = onSnapshot(actionsRef, (snapshot) => {
-            snapshot.docChanges().forEach(async (change) => {
-                if (change.type === "added") {
-                    const actionData = change.doc.data();
-                    const actionId = change.doc.id;
-                    
-                    await runTransaction(db, async (transaction) => {
-                        const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
-                        const gameDoc = await transaction.get(gameDocRef);
-                        if (!gameDoc.exists()) return;
-                        
-                        const playersColRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`);
-                        const playersSnapshot = await getDocs(query(playersColRef));
-                        let playersData = playersSnapshot.docs.map(d => ({id: d.id, ...d.data()}));
-                        let gameStateData = gameDoc.data();
-                        
-                        if (actionData.action === 'startGame') {
-                             gameStateData = handleStartGameLogic(gameStateData, playersData);
-                        } else {
-                            const result = handlePlayerActionLogic(gameStateData, playersData, actionData);
-                            gameStateData = result.gameState;
-                            playersData = result.players;
-                        }
-                        
-                        for(const p of playersData) {
-                            const playerDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames/gameState/players`, p.id);
-                            transaction.set(playerDocRef, p);
-                        }
-                        
-                        transaction.set(gameDocRef, gameStateData);
-                    });
-
-                    await deleteDoc(doc(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`, actionId));
-                }
-            });
-        });
-
-        return () => unsubscribe();
-    }, [authInfo.isAuthReady, gameId]);
 
     if (!authInfo.isAuthReady) {
         return <div className="bg-gray-900 text-white min-h-screen flex items-center justify-center">Authenticating...</div>
