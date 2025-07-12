@@ -264,7 +264,7 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
     const activePlayers = useMemo(() => players.filter(p => !p.isSpectator), [players]);
     
     // Firestore paths
-    const gameDocRef = useMemo(() => doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState"), [gameId]);
+    const gameDocRef = useMemo(() => doc(db, "pokerGames", gameId), [gameId]);
     const playersColRef = useMemo(() => collection(gameDocRef, "players"), [gameDocRef]);
     const actionsColRef = useMemo(() => collection(gameDocRef, "actions"), [gameDocRef]);
 
@@ -342,7 +342,7 @@ const PokerTable = ({ gameId, playerId, setPage }) => {
         try {
             await runTransaction(db, async (transaction) => {
                 const playerDoc = await transaction.get(playerDocRef);
-                if (!playerDoc.exists()) throw "Player not found!";
+                if (!playerDoc.exists()) throw new Error("Player not found!");
                 const newChips = playerDoc.data().chips + rebuyAmount;
                 transaction.update(playerDocRef, { chips: newChips });
             });
@@ -487,7 +487,7 @@ const LoginPage = ({ setPage, userId, gameId }) => {
         setIsJoining(true);
 
         try {
-            const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
+            const gameDocRef = doc(db, "pokerGames", gameId);
             const playersColRef = collection(gameDocRef, "players");
             const playerDocRef = doc(playersColRef, userId);
 
@@ -603,9 +603,9 @@ export default function App() {
     const gameLogicRunner = useCallback(async (actionDoc) => {
         const actionData = actionDoc.data();
         const actionId = actionDoc.id;
+        const gameDocRef = doc(db, "pokerGames", gameId);
 
         await runTransaction(db, async (transaction) => {
-            const gameDocRef = doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState");
             const playersColRef = collection(gameDocRef, "players");
 
             const gameDoc = await transaction.get(gameDocRef);
@@ -632,7 +632,7 @@ export default function App() {
         });
 
         // Clean up the processed action
-        await deleteDoc(doc(collection(doc(db, `artifacts/${gameId}/public/data/pokerGames`, "gameState"), "actions"), actionId));
+        await deleteDoc(doc(collection(gameDocRef, "actions"), actionId));
     }, [gameId]);
 
 
@@ -661,7 +661,7 @@ export default function App() {
     useEffect(() => {
         if (!authInfo.isAuthReady || !gameId) return;
 
-        const actionsColRef = collection(db, `artifacts/${gameId}/public/data/pokerGames/gameState/actions`);
+        const actionsColRef = collection(db, "pokerGames", gameId, "actions");
         const unsubscribeActions = onSnapshot(actionsColRef, (snapshot) => {
             snapshot.docChanges().forEach((change) => {
                 if (change.type === "added") {
@@ -728,7 +728,6 @@ export default function App() {
         if (!player || gameState.currentTurnPlayerId !== player.id) return { gameState, players };
 
         let activePlayers = players.filter(p => !p.isSpectator && !p.hasFolded);
-        const currentIndex = activePlayers.findIndex(p => p.id === player.id);
 
         switch(actionData.action) {
             case 'fold':
